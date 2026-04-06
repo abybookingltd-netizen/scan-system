@@ -249,6 +249,30 @@
         .btn-save   { background: var(--green); color: white; }
         .btn-cancel { background: #2a2a3f; color: #aaa; }
 
+        /* ── Flip camera button (mobile only) ── */
+        .flip-btn {
+            display: none;   /* hidden on desktop */
+            position: absolute;
+            top: 10px; right: 10px;
+            z-index: 10;
+            background: rgba(0,0,0,0.55);
+            border: 1.5px solid rgba(255,255,255,0.2);
+            border-radius: 50%;
+            width: 42px; height: 42px;
+            align-items: center; justify-content: center;
+            cursor: pointer;
+            font-size: 1.3em;
+            color: white;
+            backdrop-filter: blur(4px);
+            transition: background 0.2s;
+            touch-action: manipulation;
+        }
+        .flip-btn:active { background: rgba(255,255,255,0.2); }
+
+        @media (max-width: 640px) {
+            .flip-btn { display: flex; }
+        }
+
         /* ═══════════════════════════════════════
            MOBILE  (≤ 640px)
            Stack: camera top, panel bottom (scrollable)
@@ -330,6 +354,7 @@
         <div class="cam-border" id="camBorder"></div>
         <div class="crosshair"></div>
         <div class="flash" id="flash"></div>
+        <button class="flip-btn" id="flipBtn" onclick="flipCamera()" title="Flip camera">⟳</button>
     </div>
 
     <!-- Panel -->
@@ -446,6 +471,7 @@ RINGS.forEach(ring => {
 //  STATE
 // ═══════════════════════════════════════════════════════════════════════════
 let stream        = null;
+let facingMode    = 'environment'; // start with back camera on mobile
 let isRecording   = false;
 let capturedFrames= 0;
 let zonesCapt     = new Set();
@@ -477,12 +503,19 @@ const captureCtx = captureCvs.getContext('2d', { willReadFrequently: true });
 //  CAMERA INIT
 // ═══════════════════════════════════════════════════════════════════════════
 async function initCamera() {
+    // Stop any existing stream first
+    if (stream) stream.getTracks().forEach(t => t.stop());
+
     try {
         stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+            video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: false
         });
         video.srcObject = stream;
+
+        // Mirror only the front camera
+        video.style.transform = facingMode === 'user' ? 'scaleX(-1)' : 'scaleX(1)';
+
         video.onloadedmetadata = () => {
             resizeCanvases();
             buildZoneGrid();
@@ -491,8 +524,25 @@ async function initCamera() {
             camBorder.className = 'cam-border ready';
         };
     } catch (e) {
-        setStatus('Camera error: ' + e.message, 'error');
+        // Fallback: try without facingMode constraint
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            video.srcObject = stream;
+            video.style.transform = 'scaleX(-1)';
+            video.onloadedmetadata = () => { resizeCanvases(); buildZoneGrid(); };
+        } catch (e2) {
+            setStatus('Camera error: ' + e2.message, 'error');
+        }
     }
+}
+
+async function flipCamera() {
+    if (isRecording) return; // don't flip mid-recording
+    facingMode = facingMode === 'environment' ? 'user' : 'environment';
+    const btn  = document.getElementById('flipBtn');
+    btn.style.opacity = '0.4';
+    await initCamera();
+    btn.style.opacity = '1';
 }
 
 function resizeCanvases() {
@@ -1115,6 +1165,7 @@ window.build3D        = build3D;
 window.resetScanner   = resetScanner;
 window.saveDish       = saveDish;
 window.closePreview   = closePreview;
+window.flipCamera     = flipCamera;
 
 // ── Start ──
 initCamera();
