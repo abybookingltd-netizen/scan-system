@@ -1,0 +1,305 @@
+# PROMPT FOR CLAUDE CODE - 3D Restaurant Food Scanning System
+
+Copy and paste this entire prompt into Claude Code:
+
+---
+
+I need you to build a complete 3D restaurant food scanning and ordering system. This is an INTERMEDIATE level project with the following requirements:
+
+## PROJECT OVERVIEW
+Build a full-stack restaurant system where:
+1. Staff can upload 3D models of food (GLB/GLTF format) 
+2. Customers can view interactive 3D models of menu items before ordering
+3. System works on web, mobile, and kiosk displays
+4. Includes AR preview capabilities
+
+## TECHNICAL STACK
+- **Backend**: Node.js + Express
+- **Database**: PostgreSQL for menu data, file storage for 3D models
+- **Frontend**: React with Three.js for 3D rendering
+- **3D Format**: GLB/GLTF (industry standard for web 3D)
+- **AR**: model-viewer library (supports ARKit and ARCore)
+
+## FEATURES TO IMPLEMENT
+
+### 1. BACKEND API (Node.js/Express)
+Create RESTful API with these endpoints:
+
+**Menu Management:**
+- POST /api/menu - Upload new dish with 3D model
+- GET /api/menu - Get all menu items (with filtering by category)
+- GET /api/menu/:id - Get single menu item details
+- PUT /api/menu/:id - Update menu item
+- DELETE /api/menu/:id - Delete menu item
+- GET /api/categories - Get all food categories
+
+**File Upload:**
+- Support uploading .glb, .gltf files (up to 50MB)
+- Support uploading thumbnail images (JPG/PNG)
+- Store files in organized folder structure
+- Generate unique filenames to prevent conflicts
+
+**Search & Filter:**
+- GET /api/search?q=query - Search menu items by name/description
+- GET /api/menu?category=appetizer - Filter by category
+- GET /api/menu?priceRange=10-20 - Filter by price range
+
+**Database Schema (PostgreSQL):**
+```sql
+CREATE TABLE menu_items (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  category VARCHAR(100),
+  description TEXT,
+  price DECIMAL(10,2),
+  currency VARCHAR(3) DEFAULT 'USD',
+  model_path VARCHAR(500),
+  thumbnail_path VARCHAR(500),
+  allergens JSONB,
+  nutritional_info JSONB,
+  available BOOLEAN DEFAULT true,
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE categories (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(100) UNIQUE NOT NULL,
+  display_order INT
+);
+
+CREATE TABLE orders (
+  id SERIAL PRIMARY KEY,
+  table_number INT,
+  items JSONB,
+  total_price DECIMAL(10,2),
+  status VARCHAR(50),
+  created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### 2. FRONTEND - Admin Dashboard (React)
+Build an admin interface for restaurant staff:
+
+**Features:**
+- Upload new menu items with drag-and-drop
+- Preview 3D models before saving
+- Edit existing items (name, price, description, availability)
+- Manage categories
+- View upload progress bars
+- Bulk upload multiple items
+- Image thumbnail generator from 3D model
+- Form validation
+
+**Components needed:**
+- FileUploader component (drag-and-drop zone)
+- 3DModelPreview component (Three.js viewer)
+- MenuItemForm component
+- MenuList component (table view with actions)
+- CategoryManager component
+
+### 3. FRONTEND - Customer Menu Viewer (React)
+Build customer-facing menu interface:
+
+**Features:**
+- Grid layout showing all menu items with 3D thumbnails
+- Interactive 3D viewer with:
+  - Mouse drag to rotate
+  - Scroll to zoom
+  - Auto-rotation option
+  - Realistic lighting and shadows
+- Modal popup for full-screen 3D view
+- AR button to view food in real space (mobile only)
+- Filter by category (tabs or dropdown)
+- Search functionality
+- Add to cart functionality
+- Responsive design (works on phone, tablet, desktop)
+
+**3D Viewer Requirements:**
+- Use model-viewer library OR custom Three.js implementation
+- Progressive loading (show low-res preview, then high-res)
+- Loading indicators
+- Fallback for browsers without WebGL support
+- Performance optimization (lazy loading, LOD if available)
+
+**AR Functionality:**
+- Detect AR capability (ARKit on iOS, ARCore on Android)
+- Show AR button only on supported devices
+- Launch AR viewer with proper scaling
+- Instructions for first-time AR users
+
+### 4. FILE STRUCTURE
+Organize the project like this:
+
+```
+restaurant-3d-system/
+├── backend/
+│   ├── server.js
+│   ├── routes/
+│   │   ├── menu.js
+│   │   ├── upload.js
+│   │   └── orders.js
+│   ├── models/
+│   │   ├── MenuItem.js
+│   │   └── Order.js
+│   ├── middleware/
+│   │   ├── upload.js (multer config)
+│   │   └── validation.js
+│   ├── config/
+│   │   └── database.js
+│   └── uploads/
+│       ├── models/
+│       └── thumbnails/
+├── frontend/
+│   ├── admin/
+│   │   ├── src/
+│   │   │   ├── components/
+│   │   │   │   ├── FileUploader.jsx
+│   │   │   │   ├── ModelPreview.jsx
+│   │   │   │   ├── MenuItemForm.jsx
+│   │   │   │   └── MenuList.jsx
+│   │   │   ├── App.jsx
+│   │   │   └── index.js
+│   │   └── package.json
+│   └── customer/
+│       ├── src/
+│       │   ├── components/
+│       │   │   ├── MenuGrid.jsx
+│       │   │   ├── MenuItem3D.jsx
+│       │   │   ├── ModelViewer.jsx
+│       │   │   ├── ARButton.jsx
+│       │   │   └── Cart.jsx
+│       │   ├── App.jsx
+│       │   └── index.js
+│       └── package.json
+└── README.md
+```
+
+### 5. 3D MODEL REQUIREMENTS
+Support these features for 3D models:
+
+**Formats:**
+- Primary: GLB (binary GLTF) - preferred
+- Secondary: GLTF (JSON + separate textures)
+
+**Optimization:**
+- Accept models up to 50MB
+- Recommend models under 10MB for web performance
+- Support Draco compression if present
+- Auto-generate multiple LOD levels if possible
+
+**Display:**
+- PBR (Physically Based Rendering) materials
+- HDR environment lighting
+- Cast shadows on ground plane
+- Ambient occlusion
+
+### 6. SPECIFIC DEPENDENCIES TO USE
+
+**Backend:**
+```json
+{
+  "express": "^4.18.x",
+  "pg": "^8.11.x",
+  "multer": "^1.4.x",
+  "cors": "^2.8.x",
+  "dotenv": "^16.0.x",
+  "sharp": "^0.32.x"
+}
+```
+
+**Frontend:**
+```json
+{
+  "react": "^18.2.x",
+  "three": "^0.157.x",
+  "@react-three/fiber": "^8.14.x",
+  "@react-three/drei": "^9.88.x",
+  "@google/model-viewer": "^3.3.x",
+  "axios": "^1.5.x"
+}
+```
+
+### 7. IMPORTANT IMPLEMENTATION DETAILS
+
+**File Upload:**
+- Use multer for handling multipart form data
+- Validate file extensions (.glb, .gltf only for models)
+- Generate unique filenames (timestamp + random string)
+- Store file metadata in database
+- Return public URLs for accessing files
+
+**3D Rendering:**
+- Use model-viewer for simplicity OR @react-three/fiber for more control
+- Implement progressive loading (show spinner while loading)
+- Add error handling for corrupt/invalid models
+- Optimize camera settings (good default view angle)
+- Add ground plane with shadow receiving
+
+**Performance:**
+- Implement pagination for menu items (20 items per page)
+- Lazy load 3D models (only load when visible)
+- Cache 3D models in browser
+- Use CDN for serving static 3D files in production
+- Compress responses with gzip
+
+**Security:**
+- Validate file types server-side
+- Limit file sizes
+- Sanitize user inputs
+- Use parameterized SQL queries (prevent injection)
+- CORS configuration for API
+
+### 8. DOCUMENTATION TO INCLUDE
+
+Create README with:
+- Installation instructions
+- How to run backend (npm start)
+- How to run frontend (npm start)
+- Database setup instructions
+- Environment variables needed
+- API endpoint documentation
+- How to scan food and create 3D models
+- Recommended scanning tools (Polycam app, etc.)
+
+### 9. TESTING REQUIREMENTS
+
+Include:
+- Test with sample GLB models (provide download links)
+- Error handling for:
+  - Invalid file formats
+  - Corrupt 3D models
+  - Network failures
+  - Missing textures
+- Browser compatibility notes
+
+### 10. BONUS FEATURES (if time permits)
+
+- Order cart system
+- Table number assignment
+- Real-time order status updates (WebSocket)
+- Print kitchen orders
+- Analytics dashboard (popular items, sales)
+- Multi-language support
+- Dark mode
+- Nutritional information display
+- Allergen filtering
+
+---
+
+## OUTPUT REQUIREMENTS
+
+Please build this project with:
+1. Clean, commented code
+2. Proper error handling everywhere
+3. Console logs for debugging
+4. Professional UI/UX
+5. Mobile-responsive design
+6. Setup instructions in README
+7. Example .env file
+
+Start with the backend API, then build the admin dashboard, then the customer menu viewer.
+
+Make sure the 3D viewer is smooth and performs well even with multiple models on screen.
+
+Let me know when each major component is complete!

@@ -1,0 +1,1123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live 3D Dish Scanner</title>
+    <!-- Three.js + GLTFExporter (all browser, no backend needed for 3D) -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --green:  #22c55e;
+            --orange: #f97316;
+            --blue:   #3b82f6;
+            --red:    #ef4444;
+            --accent: #667eea;
+            --bg:     #0a0a14;
+        }
+        html, body {
+            background: var(--bg);
+            color: white;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            height: 100%;
+        }
+        body {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ── Header ── */
+        header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 16px;
+            background: rgba(255,255,255,0.05);
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            flex-shrink: 0;
+            gap: 8px;
+        }
+        header h1 { font-size: 1em; font-weight: 700; white-space: nowrap; }
+        header a   { color: #888; text-decoration: none; font-size: 0.82em; white-space: nowrap; }
+        header a:hover { color: white; }
+
+        /* ── Layout: side-by-side on desktop, stacked on mobile ── */
+        .layout {
+            display: flex;
+            flex: 1;
+        }
+
+        /* ── Camera side ── */
+        .cam-side {
+            flex: 1;
+            position: relative;
+            background: #000;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            /* On mobile: fixed height so camera doesn't take full screen */
+            min-height: 240px;
+        }
+        #video {
+            width: 100%; height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+        .overlay-stack { position: absolute; inset: 0; pointer-events: none; }
+        #coverageCanvas, #featureCanvas, #guideCanvas {
+            position: absolute; inset: 0; width: 100%; height: 100%;
+        }
+        .cam-border {
+            position: absolute; inset: 6px;
+            border-radius: 10px;
+            border: 2.5px solid transparent;
+            pointer-events: none;
+            transition: border-color 0.3s, box-shadow 0.3s;
+        }
+        .cam-border.ready   { border-color: var(--green);  box-shadow: 0 0 16px rgba(34,197,94,0.4); }
+        .cam-border.warn    { border-color: var(--orange); box-shadow: 0 0 16px rgba(249,115,22,0.3); }
+        .cam-border.capture { border-color: white;         box-shadow: 0 0 28px rgba(255,255,255,0.7); }
+        .crosshair {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 40px; height: 40px;
+            pointer-events: none;
+        }
+        .crosshair::before, .crosshair::after {
+            content: ''; position: absolute; background: rgba(255,255,255,0.4);
+        }
+        .crosshair::before { width: 1px; height: 100%; left: 50%; transform: translateX(-50%); }
+        .crosshair::after  { height: 1px; width: 100%; top: 50%; transform: translateY(-50%); }
+        .flash {
+            position: absolute; inset: 0;
+            background: white; opacity: 0;
+            pointer-events: none; transition: opacity 0.05s;
+        }
+        .flash.active { opacity: 0.5; }
+
+        /* ── Panel ── */
+        .panel {
+            width: 300px;
+            flex-shrink: 0;
+            background: #111120;
+            border-left: 1px solid rgba(255,255,255,0.07);
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            padding: 16px;
+            gap: 14px;
+        }
+        .panel-section h3 {
+            font-size: 0.7em; text-transform: uppercase;
+            letter-spacing: 1px; color: #555; margin-bottom: 8px;
+        }
+
+        /* Zone grid */
+        .zone-grid {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            gap: 3px;
+        }
+        .zone-cell {
+            aspect-ratio: 1; border-radius: 3px;
+            background: #1e1e2e;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.48em; color: #444;
+            transition: background 0.25s, color 0.25s;
+        }
+        .zone-cell.captured { background: var(--green); color: white; }
+        .zone-cell.current  { background: var(--blue);  color: white; box-shadow: 0 0 6px rgba(59,130,246,0.5); }
+        .ring-label { grid-column: 1/-1; font-size: 0.6em; color: #444; padding: 1px 0; }
+
+        /* Progress */
+        .progress-wrap { background: #1a1a2a; border-radius: 10px; padding: 11px 13px; }
+        .progress-label {
+            display: flex; justify-content: space-between;
+            font-size: 0.78em; color: #aaa; margin-bottom: 6px;
+        }
+        .progress-bar-bg { background: #2a2a40; border-radius: 10px; height: 7px; overflow: hidden; }
+        .progress-bar-fill {
+            height: 100%; border-radius: 10px;
+            background: linear-gradient(90deg, var(--accent), var(--green));
+            transition: width 0.35s ease; width: 0%;
+        }
+
+        /* Status */
+        .status-msg {
+            font-size: 0.83em; color: #ccc; line-height: 1.5;
+            padding: 9px 12px; background: #1a1a2a;
+            border-radius: 8px; border-left: 3px solid var(--accent);
+            min-height: 36px;
+        }
+        .status-msg.ok    { border-color: var(--green);  color: #86efac; }
+        .status-msg.warn  { border-color: var(--orange); color: #fdba74; }
+        .status-msg.error { border-color: var(--red);    color: #fca5a5; }
+
+        /* Form */
+        .form-group { display: flex; flex-direction: column; gap: 4px; }
+        .form-group label { font-size: 0.7em; color: #555; }
+        .form-group input {
+            background: #1a1a2a; border: 1.5px solid #2a2a3f;
+            border-radius: 8px; color: white;
+            padding: 8px 11px; font-size: 0.85em; outline: none;
+            width: 100%;
+        }
+        .form-group input:focus { border-color: var(--accent); }
+
+        /* Buttons */
+        .btn {
+            width: 100%; padding: 12px; border-radius: 10px;
+            border: none; font-size: 0.88em; font-weight: 700;
+            cursor: pointer; transition: opacity 0.2s, transform 0.15s;
+            touch-action: manipulation;
+        }
+        .btn:hover:not(:disabled) { opacity: 0.85; transform: translateY(-1px); }
+        .btn:active:not(:disabled) { transform: scale(0.97); }
+        .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+        .btn-record { background: var(--red);    color: white; }
+        .btn-stop   { background: var(--orange); color: white; }
+        .btn-build  { background: linear-gradient(135deg, var(--accent), #764ba2); color: white; }
+        .btn-reset  { background: #1e1e30; color: #777; font-size: 0.78em; padding: 8px; }
+
+        .rec-dot {
+            display: inline-block; width: 9px; height: 9px;
+            background: var(--red); border-radius: 50%;
+            margin-right: 6px; animation: pulse 1s infinite;
+        }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+        /* Thumbnails */
+        .thumb-strip { display: flex; gap: 5px; overflow-x: auto; padding-bottom: 3px; }
+        .thumb-strip img {
+            width: 44px; height: 44px; object-fit: cover;
+            border-radius: 5px; border: 2px solid transparent; flex-shrink: 0;
+        }
+        .thumb-strip img.latest { border-color: var(--green); }
+
+        /* Processing overlay */
+        .proc-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.92); z-index: 999;
+            flex-direction: column; align-items: center;
+            justify-content: center; gap: 18px; text-align: center; padding: 32px 20px;
+        }
+        .proc-overlay.active { display: flex; }
+        .spinner-lg {
+            width: 52px; height: 52px;
+            border: 4px solid rgba(255,255,255,0.12);
+            border-top-color: var(--accent);
+            border-radius: 50%; animation: spin 0.85s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .proc-overlay h2 { font-size: 1.2em; }
+        .proc-overlay p  { color: #777; font-size: 0.85em; max-width: 300px; line-height: 1.6; }
+        #procStep { color: #aaa; font-size: 0.8em; margin-top: 4px; }
+        #procBar  { width: min(280px, 90vw); height: 6px; background: #222; border-radius: 6px; overflow: hidden; margin-top: 6px; }
+        #procBarFill {
+            height: 100%; width: 0%;
+            background: linear-gradient(90deg, var(--accent), var(--green));
+            transition: width 0.4s ease; border-radius: 6px;
+        }
+
+        /* Preview overlay */
+        .preview-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.95); z-index: 1000;
+            flex-direction: column; align-items: center;
+            justify-content: center; gap: 14px; padding: 20px;
+        }
+        .preview-overlay.active { display: flex; }
+        #previewCanvas {
+            border-radius: 12px; background: #111;
+            width: 100%; max-width: 600px;
+            height: auto; aspect-ratio: 3/2;
+        }
+        .preview-overlay h2 { font-size: 1.1em; }
+        .preview-actions { display: flex; gap: 10px; width: 100%; max-width: 360px; }
+        .preview-actions .btn { flex: 1; padding: 12px; }
+        .btn-save   { background: var(--green); color: white; }
+        .btn-cancel { background: #2a2a3f; color: #aaa; }
+
+        /* ═══════════════════════════════════════
+           MOBILE  (≤ 640px)
+           Stack: camera top, panel bottom (scrollable)
+        ═══════════════════════════════════════ */
+        @media (max-width: 640px) {
+            body { overflow-y: auto; }
+
+            .layout {
+                flex-direction: column;
+                min-height: calc(100vh - 45px);
+            }
+
+            .cam-side {
+                width: 100%;
+                height: 52vw;   /* roughly 16:9 on phone */
+                min-height: 200px;
+                max-height: 320px;
+                flex-shrink: 0;
+            }
+
+            .panel {
+                width: 100%;
+                border-left: none;
+                border-top: 1px solid rgba(255,255,255,0.07);
+                flex: 1;
+                overflow-y: visible; /* let body scroll */
+                padding: 14px;
+                gap: 12px;
+            }
+
+            /* On mobile collapse zone grid to 2 rows inline */
+            .zone-grid { gap: 2px; }
+            .zone-cell { font-size: 0.42em; }
+
+            /* Two-column form grid on mobile */
+            .form-cols {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+            }
+
+            /* Action buttons side by side on mobile */
+            .action-btns {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 8px;
+            }
+            .action-btns .btn-build,
+            .action-btns .btn-reset {
+                grid-column: 1 / -1;
+            }
+
+            .proc-overlay { padding: 24px 16px; }
+            .proc-overlay h2 { font-size: 1.05em; }
+        }
+
+        /* TABLET (641–900px) narrow panel */
+        @media (min-width: 641px) and (max-width: 900px) {
+            .panel { width: 260px; }
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>3D Dish Scanner</h1>
+    <a href="/">← Back to Menu</a>
+</header>
+
+<div class="layout">
+    <!-- Camera -->
+    <div class="cam-side">
+        <video id="video" autoplay muted playsinline></video>
+        <div class="overlay-stack">
+            <canvas id="coverageCanvas"></canvas>
+            <canvas id="featureCanvas"></canvas>
+            <canvas id="guideCanvas"></canvas>
+        </div>
+        <div class="cam-border" id="camBorder"></div>
+        <div class="crosshair"></div>
+        <div class="flash" id="flash"></div>
+    </div>
+
+    <!-- Panel -->
+    <div class="panel">
+        <div class="panel-section">
+            <h3>Dish Info</h3>
+            <div style="display:flex;flex-direction:column;gap:8px">
+                <div class="form-group">
+                    <label>Dish Name *</label>
+                    <input type="text" id="dishName" placeholder="Burger Deluxe" />
+                </div>
+                <div class="form-cols">
+                    <div class="form-group">
+                        <label>Category</label>
+                        <input type="text" id="dishCategory" placeholder="Main Course" />
+                    </div>
+                    <div class="form-group">
+                        <label>Price (USD)</label>
+                        <input type="number" id="dishPrice" placeholder="12.99" step="0.01" min="0" />
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Allergens (comma separated)</label>
+                    <input type="text" id="dishAllergens" placeholder="gluten, dairy" />
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-section">
+            <h3>Scan Progress</h3>
+            <div class="progress-wrap">
+                <div class="progress-label">
+                    <span>Frames captured</span>
+                    <span id="frameCount">0 / 24</span>
+                </div>
+                <div class="progress-bar-bg">
+                    <div class="progress-bar-fill" id="progressFill"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="panel-section">
+            <h3>Angle Coverage</h3>
+            <div class="zone-grid" id="zoneGrid"></div>
+        </div>
+
+        <div class="panel-section">
+            <h3>Captured Frames</h3>
+            <div class="thumb-strip" id="thumbStrip">
+                <span style="color:#333;font-size:0.78em">No frames yet</span>
+            </div>
+        </div>
+
+        <div class="status-msg" id="statusMsg">
+            Fill in dish info, then press Start Recording.
+        </div>
+
+        <div class="action-btns">
+            <button class="btn btn-record" id="recordBtn" onclick="startRecording()">
+                ● Start Recording
+            </button>
+            <button class="btn btn-stop" id="stopBtn" onclick="stopRecording()" style="display:none">
+                <span class="rec-dot"></span>Stop
+            </button>
+            <button class="btn btn-build" id="buildBtn" onclick="build3D()" disabled>
+                Build 3D Model
+            </button>
+            <button class="btn btn-reset" onclick="resetScanner()">Reset</button>
+        </div>
+    </div>
+</div>
+
+<!-- Processing overlay -->
+<div class="proc-overlay" id="procOverlay">
+    <div class="spinner-lg"></div>
+    <h2>Building 3D Model</h2>
+    <p>Reconstructing point cloud from your frames and generating a mesh. Running entirely in your browser.</p>
+    <div id="procStep">Starting...</div>
+    <div id="procBar"><div id="procBarFill"></div></div>
+</div>
+
+<!-- Preview overlay -->
+<div class="preview-overlay" id="previewOverlay">
+    <h2 id="previewTitle">Preview 3D Model</h2>
+    <canvas id="previewCanvas" width="600" height="400"></canvas>
+    <p style="color:#666;font-size:0.82em">Drag to rotate • Scroll to zoom</p>
+    <div class="preview-actions">
+        <button class="btn btn-save" onclick="saveDish()">Save to Menu</button>
+        <button class="btn btn-cancel" onclick="closePreview()">Retake</button>
+    </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CONFIG
+// ═══════════════════════════════════════════════════════════════════════════
+const TARGET_FRAMES  = 24;
+const RINGS          = ['Low', 'Mid', 'High'];
+const COLS           = 8;
+const SAMPLE_W       = 160;   // downscaled resolution for feature detection
+const SAMPLE_H       = 90;
+
+const ZONES = [];
+RINGS.forEach(ring => {
+    for (let c = 0; c < COLS; c++) {
+        ZONES.push({ id: `${ring}_${c*45}`, ring, deg: c * 45 });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════════════════════════
+let stream        = null;
+let isRecording   = false;
+let capturedFrames= 0;
+let zonesCapt     = new Set();
+let coverageMap   = null;
+let autoCapTimer  = null;
+let frameImages   = [];      // Array of ImageData (full res) for reconstruction
+let builtGlbBlob  = null;    // Final GLB blob ready to upload
+
+const video        = document.getElementById('video');
+const coverageCvs  = document.getElementById('coverageCanvas');
+const featureCvs   = document.getElementById('featureCanvas');
+const guideCvs     = document.getElementById('guideCanvas');
+const camBorder    = document.getElementById('camBorder');
+const flash        = document.getElementById('flash');
+const coverageCtx  = coverageCvs.getContext('2d');
+const featureCtx   = featureCvs.getContext('2d');
+const guideCtx     = guideCvs.getContext('2d');
+
+// Offscreen canvas for sampling
+const sampleCvs = document.createElement('canvas');
+sampleCvs.width = SAMPLE_W; sampleCvs.height = SAMPLE_H;
+const sampleCtx = sampleCvs.getContext('2d', { willReadFrequently: true });
+
+// Capture canvas (full res frame snapshots)
+const captureCvs = document.createElement('canvas');
+const captureCtx = captureCvs.getContext('2d', { willReadFrequently: true });
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CAMERA INIT
+// ═══════════════════════════════════════════════════════════════════════════
+async function initCamera() {
+    try {
+        stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false
+        });
+        video.srcObject = stream;
+        video.onloadedmetadata = () => {
+            resizeCanvases();
+            buildZoneGrid();
+            requestAnimationFrame(overlayLoop);
+            setStatus('Camera ready. Fill in dish info then press Start Recording.', '');
+            camBorder.className = 'cam-border ready';
+        };
+    } catch (e) {
+        setStatus('Camera error: ' + e.message, 'error');
+    }
+}
+
+function resizeCanvases() {
+    const w = video.clientWidth, h = video.clientHeight;
+    [coverageCvs, featureCvs, guideCvs].forEach(c => { c.width = w; c.height = h; });
+    captureCvs.width  = video.videoWidth  || 640;
+    captureCvs.height = video.videoHeight || 360;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  ZONE GRID UI
+// ═══════════════════════════════════════════════════════════════════════════
+function buildZoneGrid() {
+    const grid = document.getElementById('zoneGrid');
+    grid.innerHTML = '';
+    RINGS.forEach(ring => {
+        const lbl = document.createElement('div');
+        lbl.className   = 'ring-label';
+        lbl.textContent = ring;
+        grid.appendChild(lbl);
+        for (let c = 0; c < COLS; c++) {
+            const id   = `${ring}_${c*45}`;
+            const cell = document.createElement('div');
+            cell.className   = 'zone-cell';
+            cell.id          = `zone-${id}`;
+            cell.textContent = `${c*45}°`;
+            grid.appendChild(cell);
+        }
+    });
+}
+
+function markZone(zoneId) {
+    if (zonesCapt.has(zoneId)) return;
+    zonesCapt.add(zoneId);
+    const el = document.getElementById(`zone-${zoneId}`);
+    if (el) el.className = 'zone-cell captured';
+}
+
+function highlightZone(zoneId) {
+    document.querySelectorAll('.zone-cell.current').forEach(el => {
+        el.classList.remove('current');
+        if (zonesCapt.has(el.id.replace('zone-', ''))) el.classList.add('captured');
+    });
+    const el = document.getElementById(`zone-${zoneId}`);
+    if (el && !zonesCapt.has(zoneId)) el.classList.add('current');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  LIVE OVERLAY LOOP  (feature mesh + coverage + guide ring)
+// ═══════════════════════════════════════════════════════════════════════════
+function overlayLoop() {
+    requestAnimationFrame(overlayLoop);
+
+    const w = featureCvs.width, h = featureCvs.height;
+    featureCtx.clearRect(0, 0, w, h);
+    guideCtx.clearRect(0, 0, w, h);
+
+    // Sample frame at low resolution for edge detection
+    sampleCtx.drawImage(video, 0, 0, SAMPLE_W, SAMPLE_H);
+    const px = sampleCtx.getImageData(0, 0, SAMPLE_W, SAMPLE_H).data;
+
+    // Simple Sobel edge → feature points
+    const pts = [];
+    for (let y = 1; y < SAMPLE_H - 1; y += 2) {
+        for (let x = 1; x < SAMPLE_W - 1; x += 2) {
+            const i   = (y * SAMPLE_W + x) * 4;
+            const gx  = px[i+4]   - px[i-4];
+            const gy  = px[i + SAMPLE_W*4] - px[i - SAMPLE_W*4];
+            const mag = Math.sqrt(gx*gx + gy*gy);
+            if (mag > 22) {
+                pts.push({
+                    x: (x / SAMPLE_W) * w,
+                    y: (y / SAMPLE_H) * h,
+                    r: px[i], g: px[i+1], b: px[i+2]
+                });
+            }
+        }
+    }
+
+    // Feature dots
+    const dotColor = isRecording ? 'rgba(34,197,94,0.9)' : 'rgba(102,126,234,0.75)';
+    pts.forEach(p => {
+        featureCtx.beginPath();
+        featureCtx.arc(p.x, p.y, 2, 0, Math.PI * 2);
+        featureCtx.fillStyle = dotColor;
+        featureCtx.fill();
+    });
+
+    // Mesh lines between nearby points
+    featureCtx.strokeStyle = isRecording
+        ? 'rgba(34,197,94,0.15)'
+        : 'rgba(102,126,234,0.1)';
+    featureCtx.lineWidth = 0.7;
+    const limit = Math.min(pts.length, 100);
+    for (let i = 0; i < limit; i++) {
+        for (let j = i + 1; j < limit; j++) {
+            const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+            if (dx*dx + dy*dy < 3600) { // < 60px
+                featureCtx.beginPath();
+                featureCtx.moveTo(pts[i].x, pts[i].y);
+                featureCtx.lineTo(pts[j].x, pts[j].y);
+                featureCtx.stroke();
+            }
+        }
+    }
+
+    // Coverage tint
+    coverageCtx.clearRect(0, 0, w, h);
+    if (coverageMap) coverageCtx.putImageData(coverageMap, 0, 0);
+
+    // Guide ellipse + arrow
+    if (isRecording) {
+        const cx = w/2, cy = h * 0.78;
+        guideCtx.beginPath();
+        guideCtx.ellipse(cx, cy, w*0.38, h*0.09, 0, 0, Math.PI*2);
+        guideCtx.strokeStyle = 'rgba(255,255,255,0.18)';
+        guideCtx.lineWidth   = 1.5;
+        guideCtx.setLineDash([5, 5]);
+        guideCtx.stroke();
+        guideCtx.setLineDash([]);
+        guideCtx.fillStyle = 'rgba(255,255,255,0.3)';
+        guideCtx.font      = '13px Segoe UI';
+        guideCtx.textAlign = 'center';
+        guideCtx.fillText('↻  Slowly rotate the dish', cx, cy + h*0.09 + 18);
+    }
+
+    // Border state
+    if (isRecording) {
+        camBorder.className = pts.length > 35 ? 'cam-border ready' : 'cam-border warn';
+    }
+
+    // Auto-capture every 2s while recording
+    if (isRecording && capturedFrames < TARGET_FRAMES) {
+        if (!autoCapTimer) {
+            autoCapTimer = setInterval(() => {
+                if (pts.length > 20) captureFrame(pts, w, h);
+            }, 2000);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  CAPTURE FRAME
+// ═══════════════════════════════════════════════════════════════════════════
+function captureFrame(pts, overlayW, overlayH) {
+    if (capturedFrames >= TARGET_FRAMES) {
+        clearInterval(autoCapTimer); autoCapTimer = null; return;
+    }
+
+    // Flash
+    flash.classList.add('active');
+    setTimeout(() => flash.classList.remove('active'), 70);
+
+    // Save full-res frame
+    captureCtx.drawImage(video, 0, 0, captureCvs.width, captureCvs.height);
+    frameImages.push(captureCtx.getImageData(0, 0, captureCvs.width, captureCvs.height));
+
+    // Coverage paint
+    if (!coverageMap) {
+        coverageMap = coverageCtx.createImageData(coverageCvs.width, coverageCvs.height);
+    }
+    pts.forEach(p => paintCoverage(p.x, p.y, 22));
+
+    // Thumbnail
+    const snap = document.createElement('canvas');
+    snap.width = 96; snap.height = 54;
+    snap.getContext('2d').drawImage(captureCvs, 0, 0, 96, 54);
+    const img = document.createElement('img');
+    img.src = snap.toDataURL('image/jpeg', 0.6);
+    const strip = document.getElementById('thumbStrip');
+    strip.querySelectorAll('img').forEach(i => i.classList.remove('latest'));
+    if (strip.querySelector('span')) strip.innerHTML = '';
+    img.classList.add('latest');
+    strip.appendChild(img);
+    strip.scrollLeft = strip.scrollWidth;
+
+    // Zone
+    const zone = ZONES[capturedFrames % ZONES.length];
+    markZone(zone.id);
+    if (capturedFrames + 1 < TARGET_FRAMES) {
+        highlightZone(ZONES[(capturedFrames + 1) % ZONES.length].id);
+    }
+
+    capturedFrames++;
+    document.getElementById('progressFill').style.width =
+        (capturedFrames / TARGET_FRAMES * 100) + '%';
+    document.getElementById('frameCount').textContent =
+        `${capturedFrames} / ${TARGET_FRAMES}`;
+
+    if (capturedFrames >= TARGET_FRAMES) {
+        clearInterval(autoCapTimer); autoCapTimer = null;
+        setStatus('All angles captured! Press Stop then Build 3D Model.', 'ok');
+    } else {
+        setStatus(`Frame ${capturedFrames}/${TARGET_FRAMES} — keep rotating the dish.`, '');
+    }
+}
+
+function paintCoverage(cx, cy, r) {
+    const w = coverageCvs.width, h = coverageCvs.height;
+    for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+            if (dx*dx + dy*dy <= r*r) {
+                const px = Math.round(cx+dx), py = Math.round(cy+dy);
+                if (px >= 0 && px < w && py >= 0 && py < h) {
+                    const i = (py*w + px)*4;
+                    coverageMap.data[i]   = 59;
+                    coverageMap.data[i+1] = 130;
+                    coverageMap.data[i+2] = 246;
+                    coverageMap.data[i+3] = 60;
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  RECORDING CONTROLS
+// ═══════════════════════════════════════════════════════════════════════════
+function startRecording() {
+    if (!document.getElementById('dishName').value.trim()) {
+        return setStatus('Enter a dish name first.', 'warn');
+    }
+    if (!stream) return setStatus('Camera not ready.', 'error');
+
+    isRecording = true;
+    document.getElementById('recordBtn').style.display = 'none';
+    document.getElementById('stopBtn').style.display   = 'block';
+    document.getElementById('buildBtn').disabled = true;
+    setStatus('Recording — slowly rotate the dish to cover all angles.', '');
+    camBorder.className = 'cam-border ready';
+}
+
+function stopRecording() {
+    isRecording = false;
+    clearInterval(autoCapTimer); autoCapTimer = null;
+    document.getElementById('recordBtn').style.display = 'block';
+    document.getElementById('stopBtn').style.display   = 'none';
+    camBorder.className = 'cam-border';
+
+    if (capturedFrames < 6) {
+        setStatus(`Only ${capturedFrames} frames. Need at least 6. Record again.`, 'warn');
+    } else {
+        document.getElementById('buildBtn').disabled = false;
+        setStatus(`${capturedFrames} frames captured. Press Build 3D Model.`, 'ok');
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  3D RECONSTRUCTION  (pure browser JS)
+// ═══════════════════════════════════════════════════════════════════════════
+async function build3D() {
+    if (frameImages.length < 6) return setStatus('Need at least 6 frames.', 'warn');
+
+    const overlay = document.getElementById('procOverlay');
+    overlay.classList.add('active');
+
+    // Small delay so UI can update
+    await tick();
+
+    try {
+        setProc('Extracting features from frames...', 10);
+        await tick();
+        const allPoints = await extractPointCloud(frameImages);
+
+        setProc('Filtering point cloud...', 55);
+        await tick();
+        const filtered = voxelFilter(allPoints, 0.012);
+
+        setProc('Building mesh...', 70);
+        await tick();
+        const { vertices, faces, colors } = buildMesh(filtered);
+
+        setProc('Exporting GLB...', 88);
+        await tick();
+        builtGlbBlob = await exportGLB(vertices, faces, colors);
+
+        setProc('Done!', 100);
+        await tick(300);
+
+        overlay.classList.remove('active');
+        showPreview(vertices, faces, colors);
+
+    } catch (e) {
+        overlay.classList.remove('active');
+        setStatus('Build failed: ' + e.message, 'error');
+        console.error(e);
+    }
+}
+
+// ── Feature extraction: Sobel edges per frame → 3D points via projection ──
+async function extractPointCloud(frames) {
+    const W = frames[0].width, H = frames[0].height;
+    const points = [];
+    const total  = frames.length;
+
+    for (let fi = 0; fi < total; fi++) {
+        setProc(`Extracting frame ${fi+1}/${total}...`, 10 + (fi/total)*40);
+        await tick();
+
+        const { data } = frames[fi];
+
+        // Build grayscale + Sobel
+        const gray = new Float32Array(W * H);
+        for (let i = 0; i < W * H; i++) {
+            const b = i * 4;
+            gray[i] = 0.299*data[b] + 0.587*data[b+1] + 0.114*data[b+2];
+        }
+
+        // Angle of this frame in the rotation (0..2π)
+        const angle = (fi / total) * Math.PI * 2;
+        const cosA  = Math.cos(angle), sinA = Math.sin(angle);
+
+        // Sample strong edge pixels → project onto cylinder surface
+        for (let y = 2; y < H - 2; y += 3) {
+            for (let x = 2; x < W - 2; x += 3) {
+                const idx = y * W + x;
+                const gx  = gray[idx+1] - gray[idx-1];
+                const gy  = gray[idx+W] - gray[idx-W];
+                const mag = Math.sqrt(gx*gx + gy*gy);
+                if (mag < 18) continue;
+
+                // Normalised pixel coords (−1..1)
+                const nx = (x / W) * 2 - 1;
+                const ny = (y / H) * 2 - 1;
+
+                // Project onto a cylinder centred at origin
+                // radius comes from horizontal position, height from vertical
+                const radius = 0.35 + Math.abs(nx) * 0.15;
+                const px3    = cosA * radius + sinA * nx * 0.18;
+                const pz3    = -sinA * radius + cosA * nx * 0.18;
+                const py3    = -ny * 0.5;
+
+                // Color from original pixel
+                const bi = idx * 4;
+                points.push({
+                    x: px3, y: py3, z: pz3,
+                    r: data[bi]/255, g: data[bi+1]/255, b: data[bi+2]/255
+                });
+            }
+        }
+    }
+    return points;
+}
+
+// ── Voxel grid filter: average points within each voxel cell ──
+function voxelFilter(points, cellSize) {
+    const map = new Map();
+    points.forEach(p => {
+        const kx = Math.round(p.x / cellSize);
+        const ky = Math.round(p.y / cellSize);
+        const kz = Math.round(p.z / cellSize);
+        const key = `${kx},${ky},${kz}`;
+        if (!map.has(key)) map.set(key, { x:0,y:0,z:0,r:0,g:0,b:0,n:0 });
+        const v = map.get(key);
+        v.x+=p.x; v.y+=p.y; v.z+=p.z;
+        v.r+=p.r; v.g+=p.g; v.b+=p.b; v.n++;
+    });
+    const out = [];
+    map.forEach(v => {
+        out.push({
+            x: v.x/v.n, y: v.y/v.n, z: v.z/v.n,
+            r: v.r/v.n, g: v.g/v.n, b: v.b/v.n
+        });
+    });
+    return out;
+}
+
+// ── Build mesh: Delaunay-like triangulation of point cloud shells ──
+function buildMesh(points) {
+    // Sort into cylindrical shells and create a quad mesh
+    const SLICES = 36, STACKS = 24;
+    const grid   = Array.from({ length: STACKS }, () => Array(SLICES).fill(null));
+
+    points.forEach(p => {
+        const angle  = Math.atan2(p.z, p.x);              // −π..π
+        const height = Math.max(-1, Math.min(1, p.y / 0.5)); // −1..1
+        const si     = Math.floor(((angle + Math.PI) / (2 * Math.PI)) * SLICES) % SLICES;
+        const ti     = Math.floor(((height + 1) / 2) * (STACKS - 1));
+        const ti2    = Math.max(0, Math.min(STACKS - 1, ti));
+
+        if (!grid[ti2][si]) {
+            grid[ti2][si] = { x: p.x, y: p.y, z: p.z, r: p.r, g: p.g, b: p.b, count: 1 };
+        } else {
+            const g = grid[ti2][si];
+            const n = g.count;
+            g.x = (g.x*n + p.x)/(n+1); g.y = (g.y*n + p.y)/(n+1); g.z = (g.z*n + p.z)/(n+1);
+            g.r = (g.r*n + p.r)/(n+1); g.g = (g.g*n + p.g)/(n+1); g.b = (g.b*n + p.b)/(n+1);
+            g.count++;
+        }
+    });
+
+    // Fill empty cells by interpolating neighbours
+    for (let t = 0; t < STACKS; t++) {
+        for (let s = 0; s < SLICES; s++) {
+            if (!grid[t][s]) {
+                const ang = (s / SLICES) * Math.PI * 2;
+                const ht  = (t / (STACKS-1)) * 2 - 1;
+                grid[t][s] = {
+                    x: Math.cos(ang)*0.38, y: ht*0.5, z: Math.sin(ang)*0.38,
+                    r: 0.7, g: 0.5, b: 0.3
+                };
+            }
+        }
+    }
+
+    // Build vertex + face arrays
+    const vertices = [], colors = [], faces = [];
+    const idx = (t, s) => t * SLICES + (s % SLICES);
+
+    for (let t = 0; t < STACKS; t++) {
+        for (let s = 0; s < SLICES; s++) {
+            const v = grid[t][s];
+            vertices.push(v.x, v.y, v.z);
+            colors.push(v.r, v.g, v.b);
+        }
+    }
+
+    for (let t = 0; t < STACKS - 1; t++) {
+        for (let s = 0; s < SLICES; s++) {
+            const a = idx(t,   s),   b = idx(t,   s+1);
+            const c = idx(t+1, s+1), d = idx(t+1, s);
+            faces.push(a, b, c);
+            faces.push(a, c, d);
+        }
+    }
+
+    return { vertices, faces, colors };
+}
+
+// ── Export to GLB using Three.js ──
+function exportGLB(vertices, faces, colors) {
+    return new Promise((resolve, reject) => {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+        geometry.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+        geometry.setIndex(faces);
+        geometry.computeVertexNormals();
+
+        const material = new THREE.MeshStandardMaterial({
+            vertexColors: true,
+            roughness: 0.7,
+            metalness: 0.05
+        });
+        const mesh  = new THREE.Mesh(geometry, material);
+        const scene = new THREE.Scene();
+        scene.add(mesh);
+
+        const exporter = new GLTFExporter();
+        exporter.parse(
+            scene,
+            glb => resolve(new Blob([glb], { type: 'model/gltf-binary' })),
+            err => reject(err),
+            { binary: true }
+        );
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  3D PREVIEW  (Three.js interactive preview before saving)
+// ═══════════════════════════════════════════════════════════════════════════
+let previewRenderer = null, previewScene = null, previewCamera = null;
+let previewAnimId = null, isDragging = false, prevMouse = null;
+
+function showPreview(vertices, faces, colors) {
+    const overlay = document.getElementById('previewOverlay');
+    const canvas  = document.getElementById('previewCanvas');
+
+    overlay.classList.add('active');
+    document.getElementById('previewTitle').textContent =
+        `Preview: ${document.getElementById('dishName').value}`;
+
+    // Dispose previous
+    if (previewRenderer) { previewRenderer.dispose(); cancelAnimationFrame(previewAnimId); }
+
+    previewRenderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    previewRenderer.setSize(canvas.clientWidth, canvas.clientHeight);
+    previewRenderer.setPixelRatio(window.devicePixelRatio);
+    previewRenderer.outputColorSpace = THREE.SRGBColorSpace;
+
+    previewScene  = new THREE.Scene();
+    previewCamera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.01, 100);
+    previewCamera.position.set(0, 0.3, 1.8);
+
+    // Lighting
+    previewScene.add(new THREE.AmbientLight(0xffffff, 1.2));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.5);
+    dir.position.set(1, 2, 2);
+    previewScene.add(dir);
+
+    // Mesh
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+    geo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+    geo.setIndex(faces);
+    geo.computeVertexNormals();
+    const mat  = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7 });
+    const mesh = new THREE.Mesh(geo, mat);
+    previewScene.add(mesh);
+
+    // Auto-rotate
+    let rot = 0;
+    function animate() {
+        previewAnimId = requestAnimationFrame(animate);
+        if (!isDragging) { mesh.rotation.y = rot += 0.008; }
+        previewRenderer.render(previewScene, previewCamera);
+    }
+    animate();
+
+    // Drag to rotate
+    canvas.onmousedown  = e => { isDragging = true; prevMouse = { x: e.clientX, y: e.clientY }; };
+    canvas.onmouseup    = () => isDragging = false;
+    canvas.onmouseleave = () => isDragging = false;
+    canvas.onmousemove  = e => {
+        if (!isDragging) return;
+        mesh.rotation.y += (e.clientX - prevMouse.x) * 0.01;
+        mesh.rotation.x += (e.clientY - prevMouse.y) * 0.01;
+        prevMouse = { x: e.clientX, y: e.clientY };
+    };
+    canvas.onwheel = e => {
+        previewCamera.position.z = Math.max(0.5, Math.min(4, previewCamera.position.z + e.deltaY * 0.003));
+    };
+}
+
+function closePreview() {
+    document.getElementById('previewOverlay').classList.remove('active');
+    cancelAnimationFrame(previewAnimId);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SAVE TO MENU  — upload GLB to Node backend → PostgreSQL
+// ═══════════════════════════════════════════════════════════════════════════
+async function saveDish() {
+    const name      = document.getElementById('dishName').value.trim();
+    const category  = document.getElementById('dishCategory').value.trim() || 'Uncategorized';
+    const price     = document.getElementById('dishPrice').value.trim() || '0';
+    const allerRaw  = document.getElementById('dishAllergens').value.trim();
+    const allergens = allerRaw ? allerRaw.split(',').map(s => s.trim()) : [];
+
+    if (!builtGlbBlob) return setStatus('No model built yet.', 'warn');
+
+    // Use first captured frame as thumbnail
+    let thumbBlob = null;
+    if (frameImages.length > 0) {
+        const tc = document.createElement('canvas');
+        tc.width = 320; tc.height = 180;
+        tc.getContext('2d').putImageData(
+            frameImages[0],
+            0, 0, 0, 0, 320, 180
+        );
+        thumbBlob = await new Promise(r => tc.toBlob(r, 'image/jpeg', 0.85));
+    }
+
+    const form = new FormData();
+    form.append('model',     builtGlbBlob, `${name.replace(/\s+/g,'_')}.glb`);
+    if (thumbBlob) form.append('thumbnail', thumbBlob, 'thumbnail.jpg');
+    form.append('name',      name);
+    form.append('category',  category);
+    form.append('price',     price);
+    form.append('allergens', JSON.stringify(allergens));
+
+    closePreview();
+    setStatus('Saving to menu...', '');
+
+    try {
+        const res  = await fetch('/api/menu', { method: 'POST', body: form });
+        const json = await res.json();
+        if (!json.success) throw new Error(json.message);
+        setStatus(`"${json.data.name}" saved to menu!`, 'ok');
+        setTimeout(() => window.location.href = '/', 1800);
+    } catch (e) {
+        setStatus('Save failed: ' + e.message, 'error');
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  RESET
+// ═══════════════════════════════════════════════════════════════════════════
+function resetScanner() {
+    isRecording    = false;
+    capturedFrames = 0;
+    zonesCapt      = new Set();
+    coverageMap    = null;
+    frameImages    = [];
+    builtGlbBlob   = null;
+    clearInterval(autoCapTimer); autoCapTimer = null;
+
+    coverageCtx.clearRect(0, 0, coverageCvs.width, coverageCvs.height);
+    document.getElementById('progressFill').style.width = '0%';
+    document.getElementById('frameCount').textContent   = '0 / 24';
+    document.getElementById('thumbStrip').innerHTML =
+        '<span style="color:#333;font-size:0.78em">No frames yet</span>';
+    document.getElementById('buildBtn').disabled   = true;
+    document.getElementById('recordBtn').style.display = 'block';
+    document.getElementById('stopBtn').style.display   = 'none';
+    camBorder.className = 'cam-border ready';
+    buildZoneGrid();
+    setStatus('Reset. Press Start Recording to begin.', '');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  HELPERS
+// ═══════════════════════════════════════════════════════════════════════════
+function setStatus(msg, type) {
+    const el = document.getElementById('statusMsg');
+    el.className = 'status-msg' + (type ? ' ' + type : '');
+    el.textContent = msg;
+}
+
+function setProc(msg, pct) {
+    document.getElementById('procStep').textContent  = msg;
+    document.getElementById('procBarFill').style.width = pct + '%';
+}
+
+function tick(ms = 0) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Expose functions to global scope (needed for inline onclick in ES module) ──
+window.startRecording = startRecording;
+window.stopRecording  = stopRecording;
+window.build3D        = build3D;
+window.resetScanner   = resetScanner;
+window.saveDish       = saveDish;
+window.closePreview   = closePreview;
+
+// ── Start ──
+initCamera();
+</script>
+</body>
+</html>

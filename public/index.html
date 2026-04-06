@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Restaurant Menu</title>
+    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.3.0/model-viewer.min.js"></script>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --accent: #667eea;
+            --accent2: #764ba2;
+            --card-bg: #ffffff;
+            --bg: #0f0f1a;
+            --text: #1a1a2e;
+            --muted: #888;
+            --success: #22c55e;
+            --danger: #ef4444;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            min-height: 100vh;
+            color: var(--text);
+        }
+
+        /* ── Header ── */
+        header {
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            padding: 24px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 16px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+        }
+
+        header h1 {
+            color: white;
+            font-size: 1.8em;
+            letter-spacing: -0.5px;
+        }
+
+        header .header-actions {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .search-bar {
+            padding: 10px 18px;
+            border-radius: 30px;
+            border: none;
+            font-size: 0.95em;
+            width: 220px;
+            outline: none;
+            background: rgba(255,255,255,0.2);
+            color: white;
+        }
+        .search-bar::placeholder { color: rgba(255,255,255,0.7); }
+
+        .btn {
+            padding: 10px 22px;
+            border-radius: 30px;
+            border: none;
+            cursor: pointer;
+            font-size: 0.9em;
+            font-weight: 600;
+            transition: opacity 0.2s, transform 0.15s;
+        }
+        .btn:hover { opacity: 0.88; transform: translateY(-1px); }
+        .btn-white { background: white; color: var(--accent); }
+        .btn-accent { background: var(--accent); color: white; }
+        .btn-danger { background: var(--danger); color: white; }
+
+        /* ── Categories ── */
+        .categories {
+            background: #1a1a2e;
+            padding: 14px 32px;
+            display: flex;
+            gap: 10px;
+            overflow-x: auto;
+            border-bottom: 1px solid #2a2a40;
+        }
+
+        .cat-btn {
+            padding: 7px 18px;
+            border-radius: 20px;
+            border: 1.5px solid #444;
+            background: transparent;
+            color: #ccc;
+            cursor: pointer;
+            white-space: nowrap;
+            font-size: 0.85em;
+            transition: all 0.2s;
+        }
+        .cat-btn.active, .cat-btn:hover {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: white;
+        }
+
+        /* ── Main ── */
+        main {
+            max-width: 1300px;
+            margin: 0 auto;
+            padding: 32px 24px;
+        }
+
+        /* ── Status bar ── */
+        #statusBar {
+            display: none;
+            padding: 12px 20px;
+            border-radius: 10px;
+            margin-bottom: 24px;
+            font-weight: 500;
+            font-size: 0.95em;
+        }
+        #statusBar.info  { background: #1e3a5f; color: #7dd3fc; display: block; }
+        #statusBar.error { background: #3f1515; color: #fca5a5; display: block; }
+        #statusBar.ok    { background: #14532d; color: #86efac; display: block; }
+
+        /* ── Menu grid ── */
+        .menu-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 24px;
+        }
+
+        .empty-state {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 80px 20px;
+            color: #555;
+        }
+        .empty-state svg { width: 64px; height: 64px; margin-bottom: 16px; opacity: 0.4; }
+        .empty-state p { font-size: 1.1em; }
+
+        /* ── Food card ── */
+        .food-card {
+            background: var(--card-bg);
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.35);
+            transition: transform 0.25s, box-shadow 0.25s;
+            display: flex;
+            flex-direction: column;
+        }
+        .food-card:hover {
+            transform: translateY(-6px);
+            box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+        }
+
+        .model-wrap {
+            width: 100%;
+            height: 240px;
+            background: #f0f0f5;
+            position: relative;
+        }
+
+        model-viewer {
+            width: 100%;
+            height: 100%;
+        }
+
+        .unavailable-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: var(--danger);
+            color: white;
+            font-size: 0.72em;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-weight: 600;
+        }
+
+        .food-info {
+            padding: 18px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .food-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 8px;
+        }
+
+        .food-name {
+            font-size: 1.15em;
+            font-weight: 700;
+            color: #111;
+        }
+
+        .food-price {
+            font-size: 1.1em;
+            font-weight: 700;
+            color: var(--accent);
+            white-space: nowrap;
+        }
+
+        .food-category {
+            font-size: 0.75em;
+            color: white;
+            background: var(--accent2);
+            padding: 2px 10px;
+            border-radius: 20px;
+            width: fit-content;
+        }
+
+        .food-desc {
+            font-size: 0.88em;
+            color: var(--muted);
+            line-height: 1.5;
+            flex: 1;
+        }
+
+        .allergens {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        .allergen-tag {
+            font-size: 0.72em;
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffc107;
+            padding: 2px 8px;
+            border-radius: 10px;
+        }
+
+        .card-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .btn-3d {
+            flex: 1;
+            padding: 9px;
+            background: linear-gradient(135deg, var(--accent), var(--accent2));
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 0.88em;
+            font-weight: 600;
+            transition: opacity 0.2s;
+        }
+        .btn-3d:hover { opacity: 0.85; }
+
+        .btn-del {
+            padding: 9px 14px;
+            background: #fee2e2;
+            color: var(--danger);
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 0.88em;
+            font-weight: 600;
+            transition: background 0.2s;
+        }
+        .btn-del:hover { background: #fca5a5; }
+
+        /* ── Modal ── */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.92);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .modal-overlay.active { display: flex; }
+
+        .modal-box {
+            background: white;
+            border-radius: 20px;
+            width: 100%;
+            max-width: 860px;
+            max-height: 92vh;
+            overflow-y: auto;
+            position: relative;
+            padding: 28px;
+        }
+
+        .modal-close {
+            position: absolute;
+            top: 14px;
+            right: 18px;
+            background: #eee;
+            border: none;
+            border-radius: 50%;
+            width: 34px;
+            height: 34px;
+            font-size: 1.2em;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-close:hover { background: #ddd; }
+
+        #modalViewer {
+            width: 100%;
+            height: 480px;
+            border-radius: 12px;
+            background: #f5f5f5;
+        }
+
+        .modal-info { margin-top: 18px; }
+        .modal-info h2 { font-size: 1.5em; margin-bottom: 6px; }
+        .modal-info .modal-price { font-size: 1.3em; color: var(--accent); font-weight: 700; }
+        .modal-info p { color: var(--muted); margin-top: 8px; line-height: 1.6; }
+
+        /* ── Upload panel ── */
+        .upload-panel {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.88);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        .upload-panel.active { display: flex; }
+
+        .upload-box {
+            background: white;
+            border-radius: 20px;
+            padding: 32px;
+            width: 100%;
+            max-width: 540px;
+            max-height: 92vh;
+            overflow-y: auto;
+            position: relative;
+        }
+
+        .upload-box h2 { font-size: 1.4em; margin-bottom: 22px; color: #111; }
+
+        .form-group { margin-bottom: 16px; }
+        .form-group label { display: block; font-size: 0.85em; font-weight: 600; color: #444; margin-bottom: 6px; }
+        .form-group input, .form-group textarea, .form-group select {
+            width: 100%;
+            padding: 10px 14px;
+            border: 1.5px solid #ddd;
+            border-radius: 10px;
+            font-size: 0.95em;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
+            border-color: var(--accent);
+        }
+        .form-group textarea { resize: vertical; min-height: 80px; }
+
+        .file-drop {
+            border: 2.5px dashed var(--accent);
+            border-radius: 12px;
+            padding: 24px;
+            text-align: center;
+            cursor: pointer;
+            color: var(--accent);
+            font-weight: 600;
+            font-size: 0.9em;
+            transition: background 0.2s;
+        }
+        .file-drop:hover { background: #f0f0ff; }
+        .file-drop input { display: none; }
+
+        .form-row { display: flex; gap: 12px; }
+        .form-row .form-group { flex: 1; }
+
+        .upload-actions { display: flex; gap: 12px; margin-top: 8px; }
+        .upload-actions .btn { flex: 1; padding: 12px; font-size: 0.95em; border-radius: 12px; }
+
+        /* ── Loading spinner ── */
+        .spinner {
+            display: inline-block;
+            width: 18px; height: 18px;
+            border: 3px solid rgba(255,255,255,0.4);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 0.7s linear infinite;
+            vertical-align: middle;
+            margin-right: 6px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        @media (max-width: 600px) {
+            header { padding: 16px; }
+            .search-bar { width: 140px; }
+            main { padding: 20px 12px; }
+            #modalViewer { height: 300px; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+    <h1>3D Restaurant Menu</h1>
+    <div class="header-actions">
+        <input class="search-bar" type="search" id="searchInput" placeholder="Search dishes..." />
+        <a href="/scanner.html" style="text-decoration:none;">
+            <button class="btn btn-white" style="background:rgba(255,255,255,0.15);color:white;border:1.5px solid rgba(255,255,255,0.3);">
+                📷 Scan Dish
+            </button>
+        </a>
+        <button class="btn btn-white" onclick="openUpload()">+ Add Dish</button>
+    </div>
+</header>
+
+<!-- Categories -->
+<div class="categories" id="categories">
+    <button class="cat-btn active" onclick="filterCategory(null, this)">All</button>
+</div>
+
+<!-- Main -->
+<main>
+    <div id="statusBar"></div>
+    <div class="menu-grid" id="menuGrid">
+        <div class="empty-state">
+            <p>Loading menu...</p>
+        </div>
+    </div>
+</main>
+
+<!-- 3D View Modal -->
+<div class="modal-overlay" id="viewModal">
+    <div class="modal-box">
+        <button class="modal-close" onclick="closeModal()">&#x2715;</button>
+        <model-viewer
+            id="modalViewer"
+            camera-controls
+            touch-action="pan-y"
+            auto-rotate
+            shadow-intensity="1"
+            ar
+            ar-modes="webxr scene-viewer quick-look">
+        </model-viewer>
+        <div class="modal-info" id="modalInfo"></div>
+    </div>
+</div>
+
+<!-- Upload Panel -->
+<div class="upload-panel" id="uploadPanel">
+    <div class="upload-box">
+        <button class="modal-close" onclick="closeUpload()">&#x2715;</button>
+        <h2>Add New Dish</h2>
+
+        <div class="form-group">
+            <label>Dish Name *</label>
+            <input type="text" id="upName" placeholder="e.g. Burger Deluxe" />
+        </div>
+
+        <div class="form-row">
+            <div class="form-group">
+                <label>Category</label>
+                <input type="text" id="upCategory" placeholder="Main Course" />
+            </div>
+            <div class="form-group">
+                <label>Price (USD) *</label>
+                <input type="number" id="upPrice" placeholder="12.99" min="0" step="0.01" />
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>Description</label>
+            <textarea id="upDesc" placeholder="Describe the dish..."></textarea>
+        </div>
+
+        <div class="form-group">
+            <label>Allergens (comma separated)</label>
+            <input type="text" id="upAllergens" placeholder="gluten, dairy, nuts" />
+        </div>
+
+        <div class="form-group">
+            <label>3D Model (.glb / .gltf) *</label>
+            <div class="file-drop" onclick="document.getElementById('upModel').click()">
+                <input type="file" id="upModel" accept=".glb,.gltf" onchange="onFileChosen(this,'modelLabel')" />
+                <span id="modelLabel">Click to choose GLB/GLTF file</span>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label>Thumbnail (optional)</label>
+            <div class="file-drop" onclick="document.getElementById('upThumb').click()">
+                <input type="file" id="upThumb" accept="image/*" onchange="onFileChosen(this,'thumbLabel')" />
+                <span id="thumbLabel">Click to choose image</span>
+            </div>
+        </div>
+
+        <div class="upload-actions">
+            <button class="btn btn-accent" id="submitBtn" onclick="submitDish()">Upload Dish</button>
+            <button class="btn" style="background:#eee;color:#333" onclick="closeUpload()">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // ── State ────────────────────────────────────────────────────────────────────
+    let allItems       = [];
+    let activeCategory = null;
+    let searchTimeout  = null;
+
+    // ── Status bar ───────────────────────────────────────────────────────────────
+    function setStatus(msg, type = 'info') {
+        const bar = document.getElementById('statusBar');
+        bar.className = type;
+        bar.textContent = msg;
+        if (type === 'ok') setTimeout(() => bar.className = '', 3000);
+    }
+
+    // ── Load menu from backend ───────────────────────────────────────────────────
+    async function loadMenu(category = null, search = null) {
+        setStatus('Loading menu...', 'info');
+        try {
+            let url = '/api/menu';
+            if (search)   url = `/api/search?q=${encodeURIComponent(search)}`;
+            else if (category) url = `/api/menu?category=${encodeURIComponent(category)}`;
+
+            const res  = await fetch(url);
+            const json = await res.json();
+
+            if (!json.success) throw new Error(json.message);
+
+            allItems = json.data;
+            renderMenu(allItems);
+            document.getElementById('statusBar').className = '';
+
+            if (!search) await loadCategories();
+        } catch (err) {
+            setStatus(`Failed to load menu: ${err.message}`, 'error');
+            renderMenu([]);
+        }
+    }
+
+    // ── Load categories ──────────────────────────────────────────────────────────
+    async function loadCategories() {
+        try {
+            const res  = await fetch('/api/categories');
+            const json = await res.json();
+            if (!json.success) return;
+
+            const bar = document.getElementById('categories');
+            // Keep "All" button, rebuild the rest
+            bar.innerHTML = `<button class="cat-btn ${!activeCategory ? 'active' : ''}" onclick="filterCategory(null, this)">All</button>`;
+            json.data.forEach(cat => {
+                const btn = document.createElement('button');
+                btn.className = 'cat-btn' + (activeCategory === cat ? ' active' : '');
+                btn.textContent = cat;
+                btn.onclick = () => filterCategory(cat, btn);
+                bar.appendChild(btn);
+            });
+        } catch (_) {}
+    }
+
+    // ── Render grid ──────────────────────────────────────────────────────────────
+    function renderMenu(items) {
+        const grid = document.getElementById('menuGrid');
+
+        if (items.length === 0) {
+            grid.innerHTML = `
+                <div class="empty-state">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                        <path stroke-linecap="round" stroke-linejoin="round"
+                            d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>
+                    </svg>
+                    <p>No dishes found.</p>
+                </div>`;
+            return;
+        }
+
+        grid.innerHTML = items.map(item => `
+            <div class="food-card" id="card-${item.id}">
+                <div class="model-wrap">
+                    ${item.modelPath
+                        ? `<model-viewer
+                                src="${item.modelPath}"
+                                alt="${item.name}"
+                                camera-controls
+                                touch-action="pan-y"
+                                auto-rotate
+                                disable-zoom
+                                interaction-prompt="none"
+                                poster="${item.thumbnail || ''}">
+                           </model-viewer>`
+                        : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#aaa;font-size:0.9em;">No model</div>`
+                    }
+                    ${!item.available ? `<span class="unavailable-badge">Unavailable</span>` : ''}
+                </div>
+                <div class="food-info">
+                    <div class="food-header">
+                        <div class="food-name">${escHtml(item.name)}</div>
+                        <div class="food-price">$${parseFloat(item.price).toFixed(2)}</div>
+                    </div>
+                    <div class="food-category">${escHtml(item.category)}</div>
+                    <div class="food-desc">${escHtml(item.description || '')}</div>
+                    ${item.allergens && item.allergens.length
+                        ? `<div class="allergens">${item.allergens.map(a => `<span class="allergen-tag">${escHtml(a)}</span>`).join('')}</div>`
+                        : ''
+                    }
+                    <div class="card-actions">
+                        <button class="btn-3d" onclick="viewItem(${item.id})">View in 3D / AR</button>
+                        <button class="btn-del" onclick="deleteItem(${item.id})" title="Delete">&#x1F5D1;</button>
+                    </div>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    // ── Category filter ──────────────────────────────────────────────────────────
+    function filterCategory(cat, btn) {
+        activeCategory = cat;
+        document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        loadMenu(cat);
+    }
+
+    // ── Search ───────────────────────────────────────────────────────────────────
+    document.getElementById('searchInput').addEventListener('input', e => {
+        clearTimeout(searchTimeout);
+        const q = e.target.value.trim();
+        searchTimeout = setTimeout(() => {
+            if (q) loadMenu(null, q);
+            else   loadMenu(activeCategory);
+        }, 350);
+    });
+
+    // ── 3D view modal ────────────────────────────────────────────────────────────
+    function viewItem(id) {
+        const item   = allItems.find(i => i.id === id);
+        if (!item)   return;
+
+        const viewer = document.getElementById('modalViewer');
+        viewer.setAttribute('src', item.modelPath || '');
+        viewer.setAttribute('alt', item.name);
+        if (item.thumbnail) viewer.setAttribute('poster', item.thumbnail);
+
+        document.getElementById('modalInfo').innerHTML = `
+            <h2>${escHtml(item.name)}</h2>
+            <div class="modal-price">$${parseFloat(item.price).toFixed(2)}</div>
+            <p>${escHtml(item.description || '')}</p>
+            ${item.allergens && item.allergens.length
+                ? `<div class="allergens" style="margin-top:10px">${item.allergens.map(a => `<span class="allergen-tag">${escHtml(a)}</span>`).join('')}</div>`
+                : ''
+            }
+        `;
+
+        document.getElementById('viewModal').classList.add('active');
+    }
+
+    function closeModal() {
+        document.getElementById('viewModal').classList.remove('active');
+        document.getElementById('modalViewer').removeAttribute('src');
+    }
+
+    document.getElementById('viewModal').addEventListener('click', e => {
+        if (e.target.id === 'viewModal') closeModal();
+    });
+
+    // ── Upload panel ─────────────────────────────────────────────────────────────
+    function openUpload()  { document.getElementById('uploadPanel').classList.add('active'); }
+    function closeUpload() { document.getElementById('uploadPanel').classList.remove('active'); }
+
+    function onFileChosen(input, labelId) {
+        document.getElementById(labelId).textContent =
+            input.files[0] ? input.files[0].name : 'Click to choose file';
+    }
+
+    async function submitDish() {
+        const name     = document.getElementById('upName').value.trim();
+        const category = document.getElementById('upCategory').value.trim() || 'Uncategorized';
+        const price    = document.getElementById('upPrice').value.trim();
+        const desc     = document.getElementById('upDesc').value.trim();
+        const allerRaw = document.getElementById('upAllergens').value.trim();
+        const model    = document.getElementById('upModel').files[0];
+        const thumb    = document.getElementById('upThumb').files[0];
+
+        if (!name)  return alert('Dish name is required.');
+        if (!price) return alert('Price is required.');
+        if (!model) return alert('3D model file is required.');
+
+        const allergens = allerRaw ? allerRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+
+        const form = new FormData();
+        form.append('name',        name);
+        form.append('category',    category);
+        form.append('description', desc);
+        form.append('price',       price);
+        form.append('allergens',   JSON.stringify(allergens));
+        form.append('model',       model);
+        if (thumb) form.append('thumbnail', thumb);
+
+        const btn = document.getElementById('submitBtn');
+        btn.innerHTML = '<span class="spinner"></span>Uploading...';
+        btn.disabled = true;
+
+        try {
+            const res  = await fetch('/api/menu', { method: 'POST', body: form });
+            const json = await res.json();
+
+            if (!json.success) throw new Error(json.message);
+
+            setStatus(`"${json.data.name}" added successfully!`, 'ok');
+            closeUpload();
+            resetUploadForm();
+            await loadMenu(activeCategory);
+        } catch (err) {
+            setStatus(`Upload failed: ${err.message}`, 'error');
+        } finally {
+            btn.innerHTML = 'Upload Dish';
+            btn.disabled = false;
+        }
+    }
+
+    function resetUploadForm() {
+        ['upName','upCategory','upPrice','upDesc','upAllergens'].forEach(id => document.getElementById(id).value = '');
+        document.getElementById('upModel').value = '';
+        document.getElementById('upThumb').value = '';
+        document.getElementById('modelLabel').textContent = 'Click to choose GLB/GLTF file';
+        document.getElementById('thumbLabel').textContent = 'Click to choose image';
+    }
+
+    // ── Delete ───────────────────────────────────────────────────────────────────
+    async function deleteItem(id) {
+        const item = allItems.find(i => i.id === id);
+        if (!confirm(`Delete "${item?.name}"? This cannot be undone.`)) return;
+
+        try {
+            const res  = await fetch(`/api/menu/${id}`, { method: 'DELETE' });
+            const json = await res.json();
+            if (!json.success) throw new Error(json.message);
+            setStatus(`"${json.data.name}" deleted.`, 'ok');
+            await loadMenu(activeCategory);
+        } catch (err) {
+            setStatus(`Delete failed: ${err.message}`, 'error');
+        }
+    }
+
+    // ── Utils ─────────────────────────────────────────────────────────────────────
+    function escHtml(str) {
+        return String(str)
+            .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ── Init ──────────────────────────────────────────────────────────────────────
+    loadMenu();
+</script>
+</body>
+</html>
