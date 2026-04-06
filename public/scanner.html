@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live 3D Dish Scanner</title>
+    <!-- OpenCV.js for real feature matching -->
+    <script async src="https://docs.opencv.org/4.x/opencv.js" onload="window.opencvReady=true"></script>
     <!-- Three.js + GLTFExporter (all browser, no backend needed for 3D) -->
     <script type="importmap">
     {
@@ -803,27 +805,31 @@ async function build3D() {
     await tick();
 
     try {
-        setProc('Extracting features from frames...', 10);
+        setProc('Detecting features with OpenCV ORB...', 10);
         await tick();
         const allPoints = await extractPointCloud(frameImages);
 
-        setProc('Filtering point cloud...', 55);
+        setProc('Filtering point cloud...', 52);
         await tick();
-        const filtered = voxelFilter(allPoints, 0.012);
+        const filtered = voxelFilter(allPoints, 0.01);
 
-        setProc('Building mesh...', 70);
+        setProc('Building mesh...', 66);
         await tick();
-        const { vertices, faces, colors } = buildMesh(filtered);
+        const { vertices, uvs, faces, gridMeta } = buildMesh(filtered);
 
-        setProc('Exporting GLB...', 88);
+        setProc('Baking texture from captured frames...', 80);
         await tick();
-        builtGlbBlob = await exportGLB(vertices, faces, colors);
+        const textureCanvas = bakeTexture(gridMeta, frameImages, 1024);
+
+        setProc('Exporting GLB with texture...', 90);
+        await tick();
+        builtGlbBlob = await exportGLB(vertices, uvs, faces, textureCanvas);
 
         setProc('Done!', 100);
         await tick(300);
 
         overlay.classList.remove('active');
-        showPreview(vertices, faces, colors);
+        showPreview(vertices, faces, textureCanvas);
 
     } catch (e) {
         overlay.classList.remove('active');
@@ -832,54 +838,181 @@ async function build3D() {
     }
 }
 
-// ── Feature extraction: Sobel edges per frame → 3D points via projection ──
-async function extractPointCloud(frames) {
-    const W = frames[0].width, H = frames[0].height;
-    const points = [];
-    const total  = frames.length;
+// ═══════════════════════════════════════════════════════════════════════════
+//  OPENCV.JS — wait for it to load
+// ═══════════════════════════════════════════════════════════════════════════
+function waitForOpenCV() {
+    return new Promise(resolve => {
+        if (window.cv && cv.Mat) return resolve();
+        const t = setInterval(() => {
+            if (window.cv && cv.Mat) { clearInterval(t); resolve(); }
+        }, 100);
+    });
+}
 
-    for (let fi = 0; fi < total; fi++) {
-        setProc(`Extracting frame ${fi+1}/${total}...`, 10 + (fi/total)*40);
+// ═══════════════════════════════════════════════════════════════════════════
+//  PRIORITY 1 — OpenCV.js ORB feature matching → real 3D point cloud
+// ═══════════════════════════════════════════════════════════════════════════
+async function extractPointCloud(frames) {
+    setProc('Waiting for OpenCV...', 10);
+    await waitForOpenCV();
+
+    const W = frames[0].width, H = frames[0].height;
+    const total   = frames.length;
+    const allPts  = []; // { x, y, z, r, g, b }
+
+    // Approximate camera intrinsics for a typical webcam
+    const focal = 0.85 * W;
+    const cx = W / 2, cy = H / 2;
+
+    // Convert ImageData → cv.Mat (RGBA → GRAY)
+    function toCvGray(imgData) {
+        const src  = cv.matFromImageData(imgData);
+        const gray = new cv.Mat();
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+        src.delete();
+        return gray;
+    }
+
+    // ORB detector — 1000 keypoints per frame
+    const orb = new cv.ORB(1000);
+    const bf  = new cv.BFMatcher(cv.NORM_HAMMING, true); // crossCheck=true
+
+    let prevGray = toCvGray(frames[0]);
+    let prevKps  = new cv.KeyPointVector();
+    let prevDesc = new cv.Mat();
+    orb.detectAndCompute(prevGray, new cv.Mat(), prevKps, prevDesc);
+
+    for (let fi = 1; fi < total; fi++) {
+        setProc(`Matching frame ${fi}/${total-1}...`, 12 + (fi / total) * 38);
         await tick();
 
-        const { data } = frames[fi];
+        const currGray = toCvGray(frames[fi]);
+        const currKps  = new cv.KeyPointVector();
+        const currDesc = new cv.Mat();
+        orb.detectAndCompute(currGray, new cv.Mat(), currKps, currDesc);
 
-        // Build grayscale + Sobel
+        if (prevDesc.rows === 0 || currDesc.rows === 0) {
+            prevGray.delete(); prevGray = currGray;
+            prevKps  = currKps; prevDesc = currDesc;
+            continue;
+        }
+
+        // Match descriptors
+        const matches = new cv.DMatchVector();
+        bf.match(prevDesc, currDesc, matches);
+
+        // Keep best 200 matches sorted by distance
+        const mArr = [];
+        for (let m = 0; m < matches.size(); m++) mArr.push(matches.get(m));
+        mArr.sort((a, b) => a.distance - b.distance);
+        const good = mArr.slice(0, Math.min(200, mArr.length));
+
+        if (good.length < 8) {
+            prevGray.delete(); prevGray = currGray;
+            prevKps = currKps; prevDesc = currDesc;
+            matches.delete();
+            continue;
+        }
+
+        // Angle of the two frames in the rotation
+        const angleA = ((fi - 1) / total) * Math.PI * 2;
+        const angleB = (fi       / total) * Math.PI * 2;
+        const cosA = Math.cos(angleA), sinA = Math.sin(angleA);
+        const cosB = Math.cos(angleB), sinB = Math.sin(angleB);
+
+        // Triangulate each good match
+        good.forEach(m => {
+            const kpA = prevKps.get(m.queryIdx);
+            const kpB = currKps.get(m.trainIdx);
+
+            const pAx = kpA.pt.x, pAy = kpA.pt.y;
+            const pBx = kpB.pt.x, pBy = kpB.pt.y;
+
+            // Back-project pixel to normalised camera ray
+            const rAx = (pAx - cx) / focal, rAy = (pAy - cy) / focal;
+            const rBx = (pBx - cx) / focal, rBy = (pBy - cy) / focal;
+
+            // Rotation between frames (pure Y-axis rotation)
+            const dAngle = angleB - angleA;
+            const cosD = Math.cos(dAngle), sinD = Math.sin(dAngle);
+
+            // Triangulate depth via parallax on the rotation axis
+            const denom = cosD - 1;
+            if (Math.abs(denom) < 1e-6) return;
+
+            const depth = Math.abs(0.35 / (rAx - rBx * cosD + rBy * sinD + 1e-9));
+            if (depth < 0.05 || depth > 2.0) return;
+
+            // 3D point in frame A's camera space, then rotate to world
+            const camX = rAx * depth;
+            const camY = -rAy * depth;
+            const camZ = depth;
+
+            const wx = cosA * camX - sinA * camZ;
+            const wy = camY;
+            const wz = sinA * camX + cosA * camZ;
+
+            // Sample colour from frame A at the keypoint pixel
+            const px = Math.round(Math.max(0, Math.min(W-1, pAx)));
+            const py = Math.round(Math.max(0, Math.min(H-1, pAy)));
+            const bi  = (py * W + px) * 4;
+            const fd  = frames[fi - 1].data;
+
+            allPts.push({
+                x: wx, y: wy, z: wz,
+                r: fd[bi]/255, g: fd[bi+1]/255, b: fd[bi+2]/255,
+                // Store source frame index + pixel for texture baking later
+                srcFrame: fi - 1, srcX: px, srcY: py
+            });
+        });
+
+        prevGray.delete(); prevGray = currGray;
+        prevKps = currKps; prevDesc = currDesc;
+        matches.delete();
+    }
+
+    // Cleanup OpenCV objects
+    prevGray.delete(); prevDesc.delete();
+    orb.delete(); bf.delete();
+
+    if (allPts.length < 50) {
+        // Fallback to Sobel if ORB found too few points (bad lighting, featureless surface)
+        console.warn('ORB found few points, falling back to Sobel projection');
+        return sobelFallback(frames);
+    }
+
+    return allPts;
+}
+
+// Sobel fallback (original method) used when OpenCV finds too few features
+function sobelFallback(frames) {
+    const W = frames[0].width, H = frames[0].height;
+    const points = [], total = frames.length;
+    for (let fi = 0; fi < total; fi++) {
+        const { data } = frames[fi];
         const gray = new Float32Array(W * H);
         for (let i = 0; i < W * H; i++) {
             const b = i * 4;
             gray[i] = 0.299*data[b] + 0.587*data[b+1] + 0.114*data[b+2];
         }
-
-        // Angle of this frame in the rotation (0..2π)
         const angle = (fi / total) * Math.PI * 2;
-        const cosA  = Math.cos(angle), sinA = Math.sin(angle);
-
-        // Sample strong edge pixels → project onto cylinder surface
-        for (let y = 2; y < H - 2; y += 3) {
-            for (let x = 2; x < W - 2; x += 3) {
+        const cosA = Math.cos(angle), sinA = Math.sin(angle);
+        for (let y = 2; y < H-2; y += 3) {
+            for (let x = 2; x < W-2; x += 3) {
                 const idx = y * W + x;
-                const gx  = gray[idx+1] - gray[idx-1];
-                const gy  = gray[idx+W] - gray[idx-W];
-                const mag = Math.sqrt(gx*gx + gy*gy);
-                if (mag < 18) continue;
-
-                // Normalised pixel coords (−1..1)
-                const nx = (x / W) * 2 - 1;
-                const ny = (y / H) * 2 - 1;
-
-                // Project onto a cylinder centred at origin
-                // radius comes from horizontal position, height from vertical
-                const radius = 0.35 + Math.abs(nx) * 0.15;
-                const px3    = cosA * radius + sinA * nx * 0.18;
-                const pz3    = -sinA * radius + cosA * nx * 0.18;
-                const py3    = -ny * 0.5;
-
-                // Color from original pixel
+                const gx = gray[idx+1] - gray[idx-1];
+                const gy = gray[idx+W] - gray[idx-W];
+                if (Math.sqrt(gx*gx+gy*gy) < 18) continue;
+                const nx = (x/W)*2-1, ny = (y/H)*2-1;
+                const r  = 0.35 + Math.abs(nx)*0.15;
                 const bi = idx * 4;
                 points.push({
-                    x: px3, y: py3, z: pz3,
-                    r: data[bi]/255, g: data[bi+1]/255, b: data[bi+2]/255
+                    x: cosA*r + sinA*nx*0.18,
+                    y: -ny*0.5,
+                    z: -sinA*r + cosA*nx*0.18,
+                    r: data[bi]/255, g: data[bi+1]/255, b: data[bi+2]/255,
+                    srcFrame: fi, srcX: x, srcY: y
                 });
             }
         }
@@ -887,54 +1020,44 @@ async function extractPointCloud(frames) {
     return points;
 }
 
-// ── Voxel grid filter: average points within each voxel cell ──
+// ── Voxel grid filter ──
 function voxelFilter(points, cellSize) {
     const map = new Map();
     points.forEach(p => {
-        const kx = Math.round(p.x / cellSize);
-        const ky = Math.round(p.y / cellSize);
-        const kz = Math.round(p.z / cellSize);
-        const key = `${kx},${ky},${kz}`;
-        if (!map.has(key)) map.set(key, { x:0,y:0,z:0,r:0,g:0,b:0,n:0 });
-        const v = map.get(key);
-        v.x+=p.x; v.y+=p.y; v.z+=p.z;
-        v.r+=p.r; v.g+=p.g; v.b+=p.b; v.n++;
+        const key = `${Math.round(p.x/cellSize)},${Math.round(p.y/cellSize)},${Math.round(p.z/cellSize)}`;
+        if (!map.has(key)) map.set(key, { ...p, n: 1 });
+        else {
+            const v = map.get(key), n = v.n;
+            v.x=(v.x*n+p.x)/(n+1); v.y=(v.y*n+p.y)/(n+1); v.z=(v.z*n+p.z)/(n+1);
+            v.r=(v.r*n+p.r)/(n+1); v.g=(v.g*n+p.g)/(n+1); v.b=(v.b*n+p.b)/(n+1);
+            v.n++;
+        }
     });
-    const out = [];
-    map.forEach(v => {
-        out.push({
-            x: v.x/v.n, y: v.y/v.n, z: v.z/v.n,
-            r: v.r/v.n, g: v.g/v.n, b: v.b/v.n
-        });
-    });
-    return out;
+    return [...map.values()];
 }
 
-// ── Build mesh: Delaunay-like triangulation of point cloud shells ──
+// ── Build mesh ──
 function buildMesh(points) {
-    // Sort into cylindrical shells and create a quad mesh
-    const SLICES = 36, STACKS = 24;
-    const grid   = Array.from({ length: STACKS }, () => Array(SLICES).fill(null));
+    const SLICES = 48, STACKS = 32;
+    const grid = Array.from({ length: STACKS }, () => Array(SLICES).fill(null));
 
     points.forEach(p => {
-        const angle  = Math.atan2(p.z, p.x);              // −π..π
-        const height = Math.max(-1, Math.min(1, p.y / 0.5)); // −1..1
-        const si     = Math.floor(((angle + Math.PI) / (2 * Math.PI)) * SLICES) % SLICES;
-        const ti     = Math.floor(((height + 1) / 2) * (STACKS - 1));
-        const ti2    = Math.max(0, Math.min(STACKS - 1, ti));
-
-        if (!grid[ti2][si]) {
-            grid[ti2][si] = { x: p.x, y: p.y, z: p.z, r: p.r, g: p.g, b: p.b, count: 1 };
+        const angle = Math.atan2(p.z, p.x);
+        const height = Math.max(-1, Math.min(1, p.y / 0.6));
+        const si  = Math.floor(((angle + Math.PI) / (Math.PI * 2)) * SLICES) % SLICES;
+        const ti  = Math.max(0, Math.min(STACKS-1, Math.floor(((height+1)/2)*(STACKS-1))));
+        if (!grid[ti][si]) {
+            grid[ti][si] = { ...p, count: 1 };
         } else {
-            const g = grid[ti2][si];
-            const n = g.count;
-            g.x = (g.x*n + p.x)/(n+1); g.y = (g.y*n + p.y)/(n+1); g.z = (g.z*n + p.z)/(n+1);
-            g.r = (g.r*n + p.r)/(n+1); g.g = (g.g*n + p.g)/(n+1); g.b = (g.b*n + p.b)/(n+1);
+            const g = grid[ti][si], n = g.count;
+            g.x=(g.x*n+p.x)/(n+1); g.y=(g.y*n+p.y)/(n+1); g.z=(g.z*n+p.z)/(n+1);
+            g.r=(g.r*n+p.r)/(n+1); g.g=(g.g*n+p.g)/(n+1); g.b=(g.b*n+p.b)/(n+1);
+            g.srcFrame = p.srcFrame; g.srcX = p.srcX; g.srcY = p.srcY;
             g.count++;
         }
     });
 
-    // Fill empty cells by interpolating neighbours
+    // Fill empty cells
     for (let t = 0; t < STACKS; t++) {
         for (let s = 0; s < SLICES; s++) {
             if (!grid[t][s]) {
@@ -942,50 +1065,114 @@ function buildMesh(points) {
                 const ht  = (t / (STACKS-1)) * 2 - 1;
                 grid[t][s] = {
                     x: Math.cos(ang)*0.38, y: ht*0.5, z: Math.sin(ang)*0.38,
-                    r: 0.7, g: 0.5, b: 0.3
+                    r: 0.6, g: 0.45, b: 0.3,
+                    srcFrame: 0, srcX: 0, srcY: 0, count: 0
                 };
             }
         }
     }
 
-    // Build vertex + face arrays
-    const vertices = [], colors = [], faces = [];
+    const vertices = [], uvs = [], faces = [], gridMeta = [];
     const idx = (t, s) => t * SLICES + (s % SLICES);
 
     for (let t = 0; t < STACKS; t++) {
         for (let s = 0; s < SLICES; s++) {
             const v = grid[t][s];
             vertices.push(v.x, v.y, v.z);
-            colors.push(v.r, v.g, v.b);
+            // Cylindrical UV mapping
+            uvs.push(s / SLICES, t / (STACKS - 1));
+            gridMeta.push({ srcFrame: v.srcFrame, srcX: v.srcX, srcY: v.srcY });
         }
     }
 
-    for (let t = 0; t < STACKS - 1; t++) {
+    for (let t = 0; t < STACKS-1; t++) {
         for (let s = 0; s < SLICES; s++) {
-            const a = idx(t,   s),   b = idx(t,   s+1);
-            const c = idx(t+1, s+1), d = idx(t+1, s);
-            faces.push(a, b, c);
-            faces.push(a, c, d);
+            const a = idx(t,s), b = idx(t,s+1), c = idx(t+1,s+1), d = idx(t+1,s);
+            faces.push(a,b,c, a,c,d);
         }
     }
 
-    return { vertices, faces, colors };
+    return { vertices, uvs, faces, gridMeta };
 }
 
-// ── Export to GLB using Three.js ──
-function exportGLB(vertices, faces, colors) {
+// ═══════════════════════════════════════════════════════════════════════════
+//  PRIORITY 2 — Texture baking: project frames onto UV atlas
+// ═══════════════════════════════════════════════════════════════════════════
+function bakeTexture(gridMeta, frames, atlasSize = 1024) {
+    const W = frames[0].width, H = frames[0].height;
+    const SLICES = 48, STACKS = 32;
+    const atlas  = document.createElement('canvas');
+    atlas.width  = atlasSize;
+    atlas.height = atlasSize;
+    const ctx    = atlas.getContext('2d');
+
+    // Fill with a neutral dark background
+    ctx.fillStyle = '#222';
+    ctx.fillRect(0, 0, atlasSize, atlasSize);
+
+    const cellW = atlasSize / SLICES;
+    const cellH = atlasSize / STACKS;
+
+    // For each grid cell, sample the colour from the source frame at the matched pixel
+    gridMeta.forEach((meta, i) => {
+        const t  = Math.floor(i / SLICES);
+        const s  = i % SLICES;
+        const fi = Math.max(0, Math.min(frames.length-1, meta.srcFrame));
+        const px = Math.max(0, Math.min(W-1, meta.srcX));
+        const py = Math.max(0, Math.min(H-1, meta.srcY));
+
+        // Sample a small patch (5×5) around the pixel and average it
+        let rSum = 0, gSum = 0, bSum = 0, n = 0;
+        const fd = frames[fi].data;
+        for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+                const sx = Math.max(0, Math.min(W-1, px+dx));
+                const sy = Math.max(0, Math.min(H-1, py+dy));
+                const bi = (sy*W+sx)*4;
+                rSum += fd[bi]; gSum += fd[bi+1]; bSum += fd[bi+2]; n++;
+            }
+        }
+
+        const r = Math.round(rSum/n), g = Math.round(gSum/n), b = Math.round(bSum/n);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+
+        // Paint cell with 1px overlap to avoid seams
+        ctx.fillRect(
+            s * cellW - 0.5,
+            t * cellH - 0.5,
+            cellW + 1,
+            cellH + 1
+        );
+    });
+
+    // Blur slightly to smooth seams between cells
+    ctx.filter = 'blur(1px)';
+    ctx.drawImage(atlas, 0, 0);
+    ctx.filter = 'none';
+
+    return atlas;
+}
+
+// ── Export to GLB with baked texture ──
+function exportGLB(vertices, uvs, faces, textureCanvas) {
     return new Promise((resolve, reject) => {
         const geometry = new THREE.BufferGeometry();
         geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-        geometry.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+        geometry.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs, 2));
         geometry.setIndex(faces);
         geometry.computeVertexNormals();
 
+        // Use baked texture canvas as material map
+        const texture       = new THREE.CanvasTexture(textureCanvas);
+        texture.flipY       = false;
+        texture.colorSpace  = THREE.SRGBColorSpace;
+
         const material = new THREE.MeshStandardMaterial({
-            vertexColors: true,
-            roughness: 0.7,
-            metalness: 0.05
+            map:       texture,
+            roughness: 0.75,
+            metalness: 0.0,
         });
+
         const mesh  = new THREE.Mesh(geometry, material);
         const scene = new THREE.Scene();
         scene.add(mesh);
@@ -1006,7 +1193,7 @@ function exportGLB(vertices, faces, colors) {
 let previewRenderer = null, previewScene = null, previewCamera = null;
 let previewAnimId = null, isDragging = false, prevMouse = null;
 
-function showPreview(vertices, faces, colors) {
+function showPreview(vertices, faces, textureCanvas) {
     const overlay = document.getElementById('previewOverlay');
     const canvas  = document.getElementById('previewCanvas');
 
@@ -1026,19 +1213,30 @@ function showPreview(vertices, faces, colors) {
     previewCamera = new THREE.PerspectiveCamera(45, canvas.clientWidth / canvas.clientHeight, 0.01, 100);
     previewCamera.position.set(0, 0.3, 1.8);
 
-    // Lighting
-    previewScene.add(new THREE.AmbientLight(0xffffff, 1.2));
-    const dir = new THREE.DirectionalLight(0xffffff, 1.5);
+    // Lighting — brighter for textured preview
+    previewScene.add(new THREE.AmbientLight(0xffffff, 1.8));
+    const dir = new THREE.DirectionalLight(0xffffff, 1.2);
     dir.position.set(1, 2, 2);
     previewScene.add(dir);
 
-    // Mesh
-    const geo = new THREE.BufferGeometry();
+    // Mesh with baked texture
+    const geo     = new THREE.BufferGeometry();
+    const SLICES  = 48, STACKS = 32;
+    const uvs     = [];
+    for (let t = 0; t < STACKS; t++)
+        for (let s = 0; s < SLICES; s++)
+            uvs.push(s / SLICES, t / (STACKS - 1));
+
     geo.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-    geo.setAttribute('color',    new THREE.Float32BufferAttribute(colors, 3));
+    geo.setAttribute('uv',       new THREE.Float32BufferAttribute(uvs, 2));
     geo.setIndex(faces);
     geo.computeVertexNormals();
-    const mat  = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7 });
+
+    const tex = new THREE.CanvasTexture(textureCanvas);
+    tex.flipY = false;
+    tex.colorSpace = THREE.SRGBColorSpace;
+
+    const mat  = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.75, metalness: 0 });
     const mesh = new THREE.Mesh(geo, mat);
     previewScene.add(mesh);
 
